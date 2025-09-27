@@ -1,0 +1,11 @@
+[package]
+name = "gips"
+description = "General inter-process solution"
+version = "0.1.0"
+
+edition = "2021"
+authors = ["GIPS Contributors"]
+license = "Apache-2.0 OR MIT"
+repository = "https://github.com/funelk/gips"
+
+[dependencies]
