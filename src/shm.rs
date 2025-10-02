@@ -6,6 +6,11 @@ use posix::*;
 #[cfg(target_os = "macos")]
 mod mach;
 
+#[cfg(target_os = "windows")]
+mod windows;
+#[cfg(target_os = "windows")]
+use windows::*;
+
 use std::{
     borrow::Cow,
     ffi, io, mem, ops, ptr, result, slice,
@@ -206,6 +211,8 @@ impl TryFrom<Object> for Shm {
                     "OOL not supported",
                 ));
             }
+            #[cfg(windows)]
+            Object::Handle(handle) => handle,
         })?;
 
         let header = unsafe { &*(inner.address().cast::<Header>()) };
@@ -228,6 +235,10 @@ impl TryFrom<&Shm> for Object {
     fn try_from(shm: &Shm) -> Result<Self> {
         let Shm { inner, .. } = shm;
 
+        #[cfg(windows)]
+        {
+            Ok(Object::Handle(inner.try_into()?))
+        }
         #[cfg(target_os = "macos")]
         {
             Ok(Object::Port(inner.try_into()?))

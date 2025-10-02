@@ -2,6 +2,8 @@
 pub mod errno;
 #[cfg(target_os = "macos")]
 pub mod mach;
+#[cfg(target_os = "windows")]
+pub mod windows;
 
 pub mod ipc;
 pub mod poll;

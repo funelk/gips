@@ -173,11 +173,12 @@ pub trait Source {
 cfg_if::cfg_if! {
     if #[cfg(target_os = "macos")] {
         mod macos;
-        pub use macos::{FdSource, MachPortSource, Poller as OsPoller, Waker as OsWaker, };
+        pub use macos::{FdSource, MachPortSource, Poller as OsPoller, Waker as OsWaker };
     } else if #[cfg(target_os = "linux")] {
         mod linux;
     } else if #[cfg(target_os = "windows")] {
         mod windows;
+        pub use windows::{IoHandleSource, NamedPipeSource, AsSource, Poller as OsPoller, Waker as OsWaker };
     }
 }
 

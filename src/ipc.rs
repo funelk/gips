@@ -8,6 +8,7 @@ cfg_if::cfg_if! {
   }
   else if #[cfg(target_os = "windows")] {
     mod windows;
+    pub use windows::{Listener, Endpoint, Pod, Connection};
   }
   else {
     compile_error!("Unsupported platform for IPC. Only Windows, macOS, and Linux are supported.");
@@ -16,6 +17,8 @@ cfg_if::cfg_if! {
 
 #[cfg(target_os = "macos")]
 use crate::mach;
+#[cfg(windows)]
+use crate::windows::handle::Handle;
 
 use std::{collections::HashSet, io};
 
@@ -56,6 +59,8 @@ impl From<mach::MachMessage<'_>> for Message {
 
 #[derive(Debug)]
 pub enum Object {
+    #[cfg(windows)]
+    Handle(Handle),
     #[cfg(target_os = "macos")]
     Port(mach::Port),
     #[cfg(target_os = "macos")]
@@ -238,3 +243,5 @@ impl IntoServiceDescriptor for ServiceDescriptor {
         self
     }
 }
+
+
