@@ -1,5 +1,7 @@
 #[cfg(unix)]
 pub mod errno;
+#[cfg(unix)]
+pub mod seqpacket;
 #[cfg(target_os = "macos")]
 pub mod mach;
 #[cfg(target_os = "windows")]

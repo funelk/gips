@@ -176,6 +176,7 @@ cfg_if::cfg_if! {
         pub use macos::{FdSource, MachPortSource, Poller as OsPoller, Waker as OsWaker };
     } else if #[cfg(target_os = "linux")] {
         mod linux;
+        pub use linux::{FdSource, SeqpacketSource, Poller as OsPoller, Waker as OsWaker };
     } else if #[cfg(target_os = "windows")] {
         mod windows;
         pub use windows::{IoHandleSource, NamedPipeSource, AsSource, Poller as OsPoller, Waker as OsWaker };

@@ -15,6 +15,7 @@
     "getegid",
     "getgid",
     "getgroups",
+    "getsockopt",
     "getuid",
     "HLOCAL",
     "HSTRING",
@@ -26,17 +27,22 @@
     "msgh",
     "munmap",
     "ngroups",
+    "nonblocking",
     "nonoverlapping",
     "PCWSTR",
+    "PEERCRED",
     "PWSTR",
     "RDWR",
     "repr",
     "rgid",
+    "SEQPACKET",
     "serde",
     "sighandler",
+    "socklen",
     "syscall",
     "sysconf",
     "thiserror",
-    "ucred"
+    "ucred",
+    "Uninit"
   ]
 }

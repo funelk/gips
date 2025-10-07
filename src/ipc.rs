@@ -5,6 +5,7 @@ cfg_if::cfg_if! {
   }
   else if #[cfg(target_os = "linux")] {
     mod linux;
+    pub use linux::{Listener, Endpoint, Pod, Connection};
   }
   else if #[cfg(target_os = "windows")] {
     mod windows;
@@ -59,6 +60,8 @@ impl From<mach::MachMessage<'_>> for Message {
 
 #[derive(Debug)]
 pub enum Object {
+    #[cfg(target_os = "linux")]
+    Fd(std::os::fd::OwnedFd),
     #[cfg(windows)]
     Handle(Handle),
     #[cfg(target_os = "macos")]
@@ -243,5 +246,3 @@ impl IntoServiceDescriptor for ServiceDescriptor {
         self
     }
 }
-
-

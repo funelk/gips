@@ -213,6 +213,8 @@ impl TryFrom<Object> for Shm {
             }
             #[cfg(windows)]
             Object::Handle(handle) => handle,
+            #[cfg(target_os = "linux")]
+            Object::Fd(fd) => fd,
         })?;
 
         let header = unsafe { &*(inner.address().cast::<Header>()) };
@@ -242,6 +244,11 @@ impl TryFrom<&Shm> for Object {
         #[cfg(target_os = "macos")]
         {
             Ok(Object::Port(inner.try_into()?))
+        }
+        #[cfg(target_os = "linux")]
+        {
+            use std::os::fd::OwnedFd;
+            Ok(Object::Fd(OwnedFd::try_from(inner)?))
         }
     }
 }
