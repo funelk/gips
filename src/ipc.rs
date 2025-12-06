@@ -1,3 +1,136 @@
+//! Inter-Process Communication (IPC) primitives.
+//!
+//! This module provides cross-platform abstractions for message-based IPC with support
+//! for transferring both data and platform-specific objects (file descriptors, handles, ports).
+//!
+//! # Architecture
+//!
+//! The IPC system follows a client-server model:
+//!
+//! - **Server**: Uses [`Listener`] to accept incoming connections
+//! - **Client**: Uses [`Endpoint`] to connect to a named service
+//! - **Connection**: [`Connection`] enables bidirectional communication
+//! - **Message**: [`Message`] contains payload data and optional transferable objects
+//!
+//! # Platform Implementations
+//!
+//! ## Linux
+//! - Uses Unix domain sockets with `SOCK_SEQPACKET` for message boundaries
+//! - Credentials via `SO_PEERCRED` socket option
+//! - File descriptors transferred via `SCM_RIGHTS`
+//!
+//! ## macOS
+//! - Uses Mach ports and Bootstrap Server for service registration
+//! - Credentials from audit tokens in Mach message trailers
+//! - Supports transferring Mach ports and out-of-line (OOL) memory
+//!
+//! ## Windows
+//! - Uses named pipes with message mode
+//! - Credentials via token impersonation
+//! - Handles transferred via duplication
+//!
+//! # Security
+//!
+//! The module provides comprehensive access control through [`Policy`]:
+//!
+//! ```no_run
+//! use gips::ipc::{ServiceDescriptor, Listener};
+//!
+//! # fn example() -> std::io::Result<()> {
+//! // Require elevated privileges
+//! let descriptor = ServiceDescriptor::new("com.example.privileged")
+//!     .require_privileged();
+//!
+//! // Restrict by user ID
+//! let descriptor = ServiceDescriptor::new("com.example.useronly")
+//!     .with_allowed_uid(["1000", "1001"]);
+//!
+//! // Custom validator
+//! let descriptor = ServiceDescriptor::new("com.example.custom")
+//!     .with_credential_validator(|creds| {
+//!         if creds.pid < 1000 {
+//!             return Err(std::io::Error::new(
+//!                 std::io::ErrorKind::PermissionDenied,
+//!                 "PID too low"
+//!             ));
+//!         }
+//!         Ok(())
+//!     });
+//!
+//! let listener = Listener::bind(descriptor)?;
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! # Examples
+//!
+//! ## Simple Echo Server
+//!
+//! ```no_run
+//! use gips::ipc::{Listener, Endpoint};
+//!
+//! // Server
+//! fn server() -> std::io::Result<()> {
+//!     let mut listener = Listener::bind("com.example.echo")?;
+//!     let pod = listener.accept()?;
+//!     let (connection, message) = pod.split();
+//!     
+//!     // Echo back the message
+//!     connection.reply(&message.payload, &message.objects)?;
+//!     Ok(())
+//! }
+//!
+//! // Client
+//! fn client() -> std::io::Result<()> {
+//!     let mut endpoint = Endpoint::connect("com.example.echo")?;
+//!     endpoint.send(b"Hello!", &[])?;
+//!     
+//!     let response = endpoint.recv()?;
+//!     println!("Received: {}", String::from_utf8_lossy(&response.payload));
+//!     Ok(())
+//! }
+//! ```
+//!
+//! ## Transferring Objects
+//!
+//! ```no_run
+//! use gips::ipc::{Endpoint, Object};
+//! use gips::shm::Shm;
+//!
+//! # fn example() -> std::io::Result<()> {
+//! let mut endpoint = Endpoint::connect("com.example.service")?;
+//!
+//! // Create shared memory and transfer it
+//! let shm = Shm::new(None::<String>, 4096)?;
+//! let shm_handle = Object::try_from(&shm)?;
+//! endpoint.send(b"shm transfer", &[shm_handle])?;
+//!
+//! // Receive a message with objects
+//! let message = endpoint.recv()?;
+//! for object in message.objects {
+//!     match object {
+//!         #[cfg(target_os = "linux")]
+//!         Object::Fd(fd) => { /* Handle file descriptor */ },
+//!         #[cfg(windows)]
+//!         Object::Handle(handle) => { /* Handle Windows handle */ },
+//!         #[cfg(target_os = "macos")]
+//!         Object::Port(port) => { /* Handle Mach port */ },
+//!         #[cfg(target_os = "macos")]
+//!         Object::Ool(ool) => { /* Handle out-of-line memory */ },
+//!     }
+//! }
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! # Service Naming
+//!
+//! Service names follow platform conventions:
+//!
+//! - **macOS**: Use reverse-DNS notation (e.g., `com.company.service`)
+//! - **Linux**: Abstract socket names or file paths
+//! - **Windows**: Named pipe names (e.g., `MyServicePipe`)
+
 cfg_if::cfg_if! {
   if #[cfg(target_os = "macos")] {
     mod macos;

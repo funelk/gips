@@ -1,4 +1,152 @@
 
+//! Event-driven I/O multiplexing for scalable IPC.
+//!
+//! This module provides a cross-platform polling abstraction for monitoring multiple
+//! I/O sources and receiving notifications when they become ready for reading or writing.
+//!
+//! # Architecture
+//!
+//! The polling system consists of:
+//!
+//! - [`Poller`]: The main event loop that monitors registered sources
+//! - [`Source`]: Trait for types that can be registered with a poller
+//! - [`Events`]: Collection of ready events returned by the poller
+//! - [`Event`]: Individual readiness notification with associated token
+//! - [`Token`]: Unique identifier for registered sources
+//! - [`Interest`]: Flags indicating read/write interests
+//!
+//! # Platform Implementations
+//!
+//! | Platform | Backend | Performance |
+//! |----------|---------|-------------|
+//! | Linux | epoll | Excellent (O(1) ready events) |
+//! | macOS | kqueue | Excellent (O(1) ready events) |
+//! | Windows | IOCP | Excellent (completion-based) |
+//!
+//! # Usage Pattern
+//!
+//! 1. Create a [`Poller`]
+//! 2. Register sources with [`Poller::register`]
+//! 3. Call [`Poller::poll`] to wait for events
+//! 4. Process ready events from [`Events`]
+//! 5. Repeat from step 3
+//!
+//! # Examples
+//!
+//! ## Basic Event Loop
+//!
+//! ```no_run
+//! use gips::poll::{Poller, Events, Interest};
+//! use gips::ipc::Listener;
+//! use std::time::Duration;
+//!
+//! # fn example() -> std::io::Result<()> {
+//! let mut poller = Poller::new()?;
+//! let mut listener = Listener::bind("com.example.service")?;
+//!
+//! // Register the listener for read events
+//! let token = poller.register(&mut listener, Interest::READABLE)?;
+//!
+//! let mut events = Events::with_capacity(128);
+//!
+//! loop {
+//!     // Wait for events with 1 second timeout
+//!     poller.poll(&mut events, Some(Duration::from_secs(1)))?;
+//!
+//!     for event in &events {
+//!         if event.token() == token && event.is_readable() {
+//!             // Accept new connection
+//!             let pod = listener.accept()?;
+//!             // Handle connection...
+//!         }
+//!     }
+//! }
+//! # }
+//! ```
+//!
+//! ## Multiple Sources
+//!
+//! ```no_run
+//! use gips::poll::{Poller, Events, Interest, Token};
+//! use gips::ipc::Listener;
+//! use std::collections::HashMap;
+//! use std::time::Duration;
+//!
+//! # fn example() -> std::io::Result<()> {
+//! let mut poller = Poller::new()?;
+//! let mut events = Events::with_capacity(128);
+//! let mut listeners = HashMap::new();
+//!
+//! // Register multiple listeners
+//! let mut listener1 = Listener::bind("com.example.service1")?;
+//! let token1 = poller.register(&mut listener1, Interest::READABLE)?;
+//! listeners.insert(token1, listener1);
+//!
+//! let mut listener2 = Listener::bind("com.example.service2")?;
+//! let token2 = poller.register(&mut listener2, Interest::READABLE)?;
+//! listeners.insert(token2, listener2);
+//!
+//! loop {
+//!     poller.poll(&mut events, Some(Duration::from_secs(1)))?;
+//!
+//!     for event in &events {
+//!         if let Some(listener) = listeners.get_mut(&event.token()) {
+//!             if event.is_readable() {
+//!                 let pod = listener.accept()?;
+//!                 // Handle connection...
+//!             }
+//!         }
+//!     }
+//! }
+//! # }
+//! ```
+//!
+//! ## Waker for External Wake-ups
+//!
+//! ```no_run
+//! use gips::poll::{Poller, Events, Token};
+//! use std::thread;
+//! use std::time::Duration;
+//!
+//! # fn example() -> std::io::Result<()> {
+//! let mut poller = Poller::new()?;
+//! let mut events = Events::with_capacity(128);
+//!
+//! // Spawn thread that wakes the poller
+//! let waker = poller.wake();
+//! thread::spawn(move || {
+//!     thread::sleep(Duration::from_secs(2));
+//!     waker.expect("wake failed");
+//! });
+//!
+//! // This will wake up when the other thread calls wake()
+//! poller.poll(&mut events, None)?;
+//!
+//! for event in &events {
+//!     if event.from_waker() {
+//!         println!("Poller was woken up!");
+//!     }
+//! }
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! # Performance Considerations
+//!
+//! - **Event capacity**: Pre-allocate sufficient capacity in [`Events`] to avoid
+//!   reallocations during polling
+//! - **Timeout**: Use appropriate timeouts; `None` blocks indefinitely, `Some(Duration::ZERO)`
+//!   returns immediately (non-blocking)
+//! - **Batch processing**: Process multiple ready events per poll iteration
+//! - **Reregister**: Use [`Poller::reregister`] to change interests without
+//!   deregistering/registering
+//!
+//! # Thread Safety
+//!
+//! - [`Poller`] is NOT thread-safe and should be used from a single thread
+//! - Multiple sources can be registered from the same thread
+//! - The waker can be used from any thread to wake up the poller
+
 use std::{collections::HashMap, fmt, io, time::Duration};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]

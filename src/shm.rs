@@ -1,3 +1,210 @@
+//! Cross-platform shared memory regions for high-performance IPC.
+//!
+//! This module provides zero-copy data sharing between processes through memory-mapped
+//! regions. Shared memory is the fastest IPC mechanism for bulk data transfer.
+//!
+//! # Features
+//!
+//! - **Zero-Copy**: Data is directly accessible without serialization or copying
+//! - **Cross-Platform**: Unified API across Linux, macOS, and Windows
+//! - **Resizable**: Memory regions can grow (within allocated limits)
+//! - **Transferable**: Handles can be sent via IPC to other processes
+//! - **Safe**: Atomic operations for concurrent access coordination
+//!
+//! # Platform Implementations
+//!
+//! | Platform | Backend | Features |
+//! |----------|---------|----------|
+//! | Linux | POSIX `shm_open` + `mmap` | Named and anonymous |
+//! | macOS | Mach memory objects | Port-based transfer |
+//! | Windows | File mapping objects | Handle-based transfer |
+//!
+//! # Memory Layout
+//!
+//! Each shared memory region has this layout:
+//!
+//! ```text
+//! +-------------------+
+//! | Header (metadata) |
+//! +-------------------+
+//! | Extension         |  (reserved for future use)
+//! +-------------------+
+//! | Data region       |  (user data)
+//! +-------------------+
+//! ```
+//!
+//! The [`Header`] contains:
+//! - `capacity`: Current usable size (atomic)
+//! - `total`: Maximum allocated size (atomic)
+//! - `extension`: Reserved byte for future metadata
+//!
+//! # Usage Patterns
+//!
+//! ## Named Shared Memory
+//!
+//! Use named shared memory when multiple processes need to access the same region
+//! by name:
+//!
+//! ```no_run
+//! use gips::shm::Shm;
+//!
+//! # fn example() -> std::io::Result<()> {
+//! // Process A: Create named shared memory
+//! let shm = Shm::new("my_shared_memory", 4096)?;
+//! shm.write(b"Hello from process A", 0);
+//!
+//! // Process B: Open existing shared memory by name
+//! let shm = Shm::open("my_shared_memory", 0)?;  // 0 = open entire region
+//! let data = shm.read(0, Some(100));
+//! println!("Data: {}", String::from_utf8_lossy(data));
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! ## Anonymous Shared Memory
+//!
+//! Use anonymous shared memory for passing between related processes via IPC:
+//!
+//! ```no_run
+//! use gips::shm::Shm;
+//! use gips::ipc::{Endpoint, Object};
+//!
+//! # fn example() -> std::io::Result<()> {
+//! // Process A: Create anonymous shared memory
+//! let shm = Shm::new(None::<String>, 4096)?;
+//! shm.write(b"Shared data", 0);
+//!
+//! // Export handle to send via IPC
+//! let handle = Object::try_from(&shm)?;
+//!
+//! // Send handle to another process
+//! let mut endpoint = Endpoint::connect("com.example.service")?;
+//! endpoint.send(b"shm_transfer", &[handle])?;
+//!
+//! // Process B: Receive and import shared memory
+//! # let mut endpoint = Endpoint::connect("com.example.service")?;
+//! let message = endpoint.recv()?;
+//! let shm_object = message.objects.into_iter().next().unwrap();
+//! let shm = Shm::try_from(shm_object)?;
+//!
+//! let data = shm.read(0, Some(100));
+//! println!("Received: {}", String::from_utf8_lossy(data));
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! ## Producer-Consumer Pattern
+//!
+//! ```no_run
+//! use gips::shm::Shm;
+//! use std::sync::atomic::{AtomicUsize, Ordering};
+//! use std::time::Duration;
+//!
+//! # fn example() -> std::io::Result<()> {
+//! let shm = Shm::new("producer_consumer", 4096)?;
+//!
+//! // Producer writes data
+//! let data = b"Important message";
+//! let written = shm.write(data, 0);
+//!
+//! // Update capacity atomically to signal consumer
+//! shm.capacity.store(written, Ordering::Release);
+//!
+//! // Consumer reads when data is ready
+//! loop {
+//!     let size = shm.capacity.load(Ordering::Acquire);
+//!     if size > 0 {
+//!         let data = shm.read(0, Some(size));
+//!         println!("Consumed: {}", String::from_utf8_lossy(data));
+//!         break;
+//!     }
+//!     std::thread::sleep(Duration::from_millis(10));
+//! }
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! ## Dynamic Resizing
+//!
+//! ```no_run
+//! use gips::shm::{Shm, Size};
+//!
+//! # fn example() -> std::io::Result<()> {
+//! // Create with initial size but larger capacity
+//! let size = Size {
+//!     mapped: 1024,      // Initial mapping
+//!     capacity: 4096,    // Maximum capacity
+//! };
+//! let shm = Shm::new(None::<String>, size)?;
+//!
+//! // Later, grow the mapping
+//! shm.resize(2048)?;
+//!
+//! // After receiving shared memory with capacity changes
+//! let shm = Shm::open("resizable", 0)?;
+//! shm.remap()?;  // Adjust mapping to current capacity
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! # Safety Considerations
+//!
+//! ## Concurrent Access
+//!
+//! Use atomic operations or external synchronization for concurrent access:
+//!
+//! ```no_run
+//! use gips::shm::Shm;
+//! use std::sync::atomic::Ordering;
+//!
+//! # fn example(shm: &Shm) {
+//! // Use atomic fields in Header
+//! let current = shm.capacity.load(Ordering::Acquire);
+//! shm.capacity.store(current + 100, Ordering::Release);
+//! # }
+//! ```
+//!
+//! ## Lifetime Management
+//!
+//! - Named shared memory persists until explicitly closed
+//! - Anonymous shared memory lives as long as a process holds a reference
+//! - Use [`OwnedShm`] for automatic cleanup on drop
+//!
+//! ```no_run
+//! use gips::shm::{Shm, OwnedShm};
+//!
+//! # fn example() -> std::io::Result<()> {
+//! let shm = Shm::new("temp_memory", 1024)?;
+//! let owned = OwnedShm(shm);
+//! // Automatically closed when `owned` goes out of scope
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! # Performance Tips
+//!
+//! - **Pre-allocate**: Create with maximum expected `capacity` to avoid resize overhead
+//! - **Alignment**: Data naturally aligned for the platform performs better
+//! - **Page size**: Use multiples of page size (typically 4KB) for efficiency
+//! - **Batch operations**: Group multiple writes together
+//!
+//! # Platform Notes
+//!
+//! ## Linux
+//! - Uses `/dev/shm` for POSIX shared memory
+//! - Names must not contain `/` (except initial)
+//! - Maximum size limited by `/proc/sys/kernel/shmmax`
+//!
+//! ## macOS
+//! - Mach memory objects don't have names at kernel level
+//! - Transfer via Mach port rights through IPC
+//! - POSIX shared memory also available but less integrated
+//!
+//! ## Windows
+//! - Named objects are in global or session namespace
+//! - Maximum size is 64-bit but limited by available address space
+//! - Handles duplicated for IPC transfer
+
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod posix;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
