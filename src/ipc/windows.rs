@@ -27,6 +27,7 @@ use crate::{
 use super::{Credentials, IntoServiceDescriptor, Message, Object, Policy};
 
 const DEFAULT_BUFFER_SIZE: u32 = 64;
+const MIN_PENDING_ACCEPTS: usize = 16; // Maintain at least this many pending accepts
 const WIRE_MAGIC: u32 = 0x5350_494C; // 'gips'
 const WIRE_VERSION: u16 = 1;
 const WIRE_HEADER_LEN: usize = 16;
@@ -95,7 +96,8 @@ impl Listener {
             acl_policy: descriptor.policy,
         };
 
-        listener.spawn_accept()?;
+        // Spawn multiple accepts upfront to handle concurrent connections
+        listener.ensure_min_accepts()?;
         Ok(listener)
     }
 
@@ -103,6 +105,8 @@ impl Listener {
         loop {
             if let Some(pod) = self.backlog.pop_front() {
                 self.backoff.reset();
+                // Ensure we maintain enough pending accepts
+                self.ensure_min_accepts()?;
                 return Ok(pod);
             }
 
@@ -119,6 +123,8 @@ impl Listener {
     pub fn try_accept(&mut self) -> io::Result<Option<Pod>> {
         if let Some(pod) = self.backlog.pop_front() {
             self.backoff.reset();
+            // Ensure we maintain enough pending accepts
+            self.ensure_min_accepts()?;
             return Ok(Some(pod));
         }
 
@@ -126,7 +132,17 @@ impl Listener {
         Ok(self.backlog.pop_front())
     }
 
-    fn spawn_accept(&mut self) -> io::Result<()> {
+    /// Ensure we maintain a minimum number of pending accepts to handle concurrent connections
+    fn ensure_min_accepts(&mut self) -> io::Result<()> {
+        while self.accepts.len() < MIN_PENDING_ACCEPTS {
+            self.spawn_single_accept()?;
+        }
+        Ok(())
+    }
+
+    /// Spawn a single accept, handling immediate connections
+    /// This ensures exactly one pending accept is added, handling any immediate connections along the way
+    fn spawn_single_accept(&mut self) -> io::Result<()> {
         // Iteratively spawn accepts until we get a pending one; avoid recursive depth.
         let mut pipe = self.build_pipe()?;
         loop {
@@ -143,12 +159,15 @@ impl Listener {
             match accept.start()? {
                 AcceptOutcome::Pending(state) => {
                     self.accepts.insert(token, state);
+                    // Successfully added a pending accept
                     break;
                 }
                 AcceptOutcome::Connected(conn_pipe) => {
+                    // Immediate connection - handle it and create another pipe
                     self.handle_new_connection(token, conn_pipe)?;
                     // Build a new pipe and continue; do NOT recurse.
                     pipe = self.build_pipe()?;
+                    // Important: continue the loop to create another accept until we get a pending one
                     continue;
                 }
             }
@@ -192,7 +211,8 @@ impl Listener {
                     }
                 }
 
-                self.spawn_accept()?;
+                // Immediately replenish accepts to maintain the minimum
+                self.ensure_min_accepts()?;
                 continue;
             }
 
@@ -216,56 +236,8 @@ impl Listener {
     fn handle_new_connection(&mut self, token: Token, pipe: NamedPipe) -> io::Result<()> {
         let connection = Connection::from_pipe(pipe)?;
         self.connections.insert(token, connection.clone());
-        self.arm_connection(token, connection)
-    }
-
-    fn arm_connection(&mut self, token: Token, connection: Connection) -> io::Result<()> {
-        loop {
-            match connection.try_recv() {
-                Ok(Some(message)) => {
-                    #[cfg(feature = "verbose")]
-                    crate::info!(
-                        "[ipc::windows] arm_connection received payload of size {}",
-                        message.payload.len()
-                    );
-
-                    // Get credentials from the connection and validate ACL
-                    let credentials = connection.get_credentials()?;
-
-                    // Check ACL policy if not unrestricted
-                    if !self.acl_policy.is_unrestricted() {
-                        if let Err(err) = self.acl_policy.check(&credentials) {
-                            // Forcibly disconnect the pipe on ACL failure
-                            let _ = connection.with_inner(|inner| {
-                                if let Some(ref pipe) = inner.pipe {
-                                    pipe.disconnect()
-                                } else {
-                                    Ok(())
-                                }
-                            });
-                            self.remove_connection(token)?;
-                            return Err(err);
-                        }
-                    }
-
-                    self.backlog.push_back(Pod::from_parts(
-                        connection.clone(),
-                        message,
-                        credentials,
-                    ));
-                    self.backoff.reset();
-                }
-                Ok(None) => break,
-                Err(err) => {
-                    if is_connection_closed(&err) {
-                        self.remove_connection(token)?;
-                        break;
-                    }
-                    return Err(err);
-                }
-            }
-        }
-
+        // Don't try to read immediately - let the normal polling handle it
+        // This avoids potential issues with reading from a freshly-connected pipe
         Ok(())
     }
 
@@ -277,8 +249,8 @@ impl Listener {
                     let credentials = connection.get_credentials()?;
 
                     // Check ACL policy if not unrestricted
-                    if !self.acl_policy.is_unrestricted() {
-                        if let Err(err) = self.acl_policy.check(&credentials) {
+                    if !self.acl_policy.is_unrestricted()
+                        && let Err(err) = self.acl_policy.check(&credentials) {
                             // Forcibly disconnect the pipe on ACL failure
                             let _ = connection.with_inner(|inner| {
                                 if let Some(ref pipe) = inner.pipe {
@@ -290,7 +262,6 @@ impl Listener {
                             self.remove_connection(token)?;
                             return Err(err);
                         }
-                    }
 
                     self.backlog.push_back(Pod::from_parts(
                         connection.clone(),

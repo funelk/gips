@@ -241,7 +241,8 @@ fn transfer_multiple_shm_objects_via_ipc() -> std::io::Result<()> {
 
     endpoint.send(b"multiple_shm", &objects)?;
 
-    let response = read_message(&mut endpoint)?;
+    // Use blocking recv to ensure we get the response before connection closes
+    let response = endpoint.recv()?;
     assert_eq!(response.payload, b"all verified");
 
     server_thread.join().expect("server thread panicked")?;
@@ -755,6 +756,245 @@ fn acl_policy_try_accept_with_policy() -> std::io::Result<()> {
     endpoint.send(b"try_accept", &[])?;
     let message = endpoint.recv()?;
     assert_eq!(message.payload, b"try_accept_ok");
+
+    server_thread.join().expect("server thread panicked")?;
+    Ok(())
+}
+
+#[test]
+fn multiple_concurrent_clients() -> std::io::Result<()> {
+    tracing_subscriber::fmt().with_target(false).try_init().ok();
+    let service = format!(
+        "gips_multi_client_test_{}_{}",
+        std::process::id(),
+        unique_suffix()
+    );
+
+    let num_clients = 10;
+    let listener = Listener::bind(&service)?;
+
+    // Server thread: accept connections from all clients
+    let server_thread = std::thread::spawn(move || -> std::io::Result<()> {
+        let mut listener = listener;
+
+        for _ in 0..num_clients {
+            let pod = listener.accept()?;
+            let (connection, message) = pod.split();
+
+            // Parse the client ID from the message and echo it back
+            let msg_str = String::from_utf8_lossy(&message.payload);
+            assert!(msg_str.starts_with("client_"));
+
+            let response = format!("response_{}", &msg_str[7..]);
+            connection.reply(response.as_bytes(), &[])?;
+        }
+
+        Ok(())
+    });
+
+    // Give server time to start
+    std::thread::sleep(std::time::Duration::from_millis(100));
+
+    // Spawn multiple client threads simultaneously
+    let mut client_threads = Vec::new();
+    for i in 0..num_clients {
+        let service = service.clone();
+        let client_thread = std::thread::spawn(move || -> std::io::Result<()> {
+            let mut endpoint = Endpoint::connect(&service)?;
+
+            let request = format!("client_{}", i);
+            endpoint.send(request.as_bytes(), &[])?;
+
+            let message = endpoint.recv()?;
+            let expected = format!("response_{}", i);
+            assert_eq!(message.payload, expected.as_bytes());
+
+            Ok(())
+        });
+        client_threads.push(client_thread);
+    }
+
+    // Wait for all clients to complete
+    for (i, thread) in client_threads.into_iter().enumerate() {
+        thread
+            .join()
+            .unwrap_or_else(|_| panic!("client thread {} panicked", i))?;
+    }
+
+    server_thread.join().expect("server thread panicked")?;
+    Ok(())
+}
+
+#[test]
+fn rapid_connection_burst() -> std::io::Result<()> {
+    tracing_subscriber::fmt().with_target(false).try_init().ok();
+    let service = format!("gips_burst_test_{}_{}", std::process::id(), unique_suffix());
+
+    let num_clients = 20;
+    let listener = Listener::bind(&service)?;
+
+    // Server thread
+    let server_thread = std::thread::spawn(move || -> std::io::Result<()> {
+        let mut listener = listener;
+
+        for i in 0..num_clients {
+            let pod = listener.accept()?;
+            let (connection, message) = pod.split();
+
+            assert_eq!(message.payload, b"burst");
+            connection.reply(format!("ack_{}", i).as_bytes(), &[])?;
+        }
+
+        Ok(())
+    });
+
+    // Wait a bit shorter to test race conditions
+    std::thread::sleep(std::time::Duration::from_millis(50));
+
+    // Spawn all clients with minimal delay between them
+    let mut client_threads = Vec::new();
+    for _ in 0..num_clients {
+        let service = service.clone();
+        let client_thread = std::thread::spawn(move || -> std::io::Result<()> {
+            let mut endpoint = Endpoint::connect(&service)?;
+            endpoint.send(b"burst", &[])?;
+            let _message = endpoint.recv()?;
+            Ok(())
+        });
+        client_threads.push(client_thread);
+        // Minimal delay to create burst
+        std::thread::sleep(std::time::Duration::from_micros(100));
+    }
+
+    // Wait for all clients
+    for (i, thread) in client_threads.into_iter().enumerate() {
+        thread
+            .join()
+            .unwrap_or_else(|_| panic!("client thread {} panicked", i))?;
+    }
+
+    server_thread.join().expect("server thread panicked")?;
+    Ok(())
+}
+
+#[test]
+fn sequential_connections() -> std::io::Result<()> {
+    tracing_subscriber::fmt().with_target(false).try_init().ok();
+    let service = format!(
+        "gips_sequential_test_{}_{}",
+        std::process::id(),
+        unique_suffix()
+    );
+
+    let num_rounds = 5;
+    let listener = Listener::bind(&service)?;
+
+    // Server thread
+    let server_thread = std::thread::spawn(move || -> std::io::Result<()> {
+        let mut listener = listener;
+
+        for round in 0..num_rounds {
+            let pod = listener.accept()?;
+            let (connection, message) = pod.split();
+
+            let expected = format!("round_{}", round);
+            assert_eq!(message.payload, expected.as_bytes());
+
+            let response = format!("done_{}", round);
+            connection.reply(response.as_bytes(), &[])?;
+        }
+
+        Ok(())
+    });
+
+    // Give server time to start
+    std::thread::sleep(std::time::Duration::from_millis(100));
+
+    // Connect sequentially (one completes before next starts)
+    for round in 0..num_rounds {
+        let mut endpoint = Endpoint::connect(&service)?;
+
+        let request = format!("round_{}", round);
+        endpoint.send(request.as_bytes(), &[])?;
+
+        let message = endpoint.recv()?;
+        let expected = format!("done_{}", round);
+        assert_eq!(message.payload, expected.as_bytes());
+
+        // Explicitly drop to close connection
+        drop(endpoint);
+
+        // Small delay between rounds
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+
+    server_thread.join().expect("server thread panicked")?;
+    Ok(())
+}
+
+#[test]
+fn multiple_clients_multiple_messages() -> std::io::Result<()> {
+    // This test simulates the RPC scenario where multiple clients
+    // connect and send multiple messages each
+    tracing_subscriber::fmt().with_target(false).try_init().ok();
+    let service = format!(
+        "gips_multi_msg_test_{}_{}",
+        std::process::id(),
+        unique_suffix()
+    );
+
+    let num_clients = 5;
+    let messages_per_client = 10;
+    let total_messages = num_clients * messages_per_client;
+
+    let listener = Listener::bind(&service)?;
+
+    // Server thread: accept connections and process messages
+    let server_thread = std::thread::spawn(move || -> std::io::Result<()> {
+        let mut listener = listener;
+        let mut message_count = 0;
+
+        while message_count < total_messages {
+            let pod = listener.accept()?;
+            let (connection, message) = pod.split();
+
+            // Echo back the message
+            connection.reply(&message.payload, &[])?;
+            message_count += 1;
+        }
+
+        Ok(())
+    });
+
+    // Give server time to start
+    std::thread::sleep(std::time::Duration::from_millis(100));
+
+    // Spawn multiple client threads
+    let mut client_threads = Vec::new();
+    for client_id in 0..num_clients {
+        let service = service.clone();
+        let client_thread = std::thread::spawn(move || -> std::io::Result<()> {
+            let mut endpoint = Endpoint::connect(&service)?;
+
+            for msg_id in 0..messages_per_client {
+                let message = format!("client_{}_msg_{}", client_id, msg_id);
+                endpoint.send(message.as_bytes(), &[])?;
+
+                let response = endpoint.recv()?;
+                assert_eq!(response.payload, message.as_bytes());
+            }
+
+            Ok(())
+        });
+        client_threads.push(client_thread);
+    }
+
+    // Wait for all clients
+    for (i, thread) in client_threads.into_iter().enumerate() {
+        thread
+            .join()
+            .unwrap_or_else(|_| panic!("client thread {} panicked", i))?;
+    }
 
     server_thread.join().expect("server thread panicked")?;
     Ok(())
