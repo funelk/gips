@@ -1,6 +1,9 @@
 mod listener;
 mod socket;
 
+#[cfg(target_os = "linux")]
+use std::os::fd::AsRawFd;
+
 use libc::{gid_t, pid_t, uid_t};
 
 pub const SOCKET_DOMAIN: socket2::Domain = socket2::Domain::UNIX;
@@ -22,7 +25,6 @@ pub struct UCred {
 impl UCred {
     pub fn from_socket_peer<T: AsRawFd>(socket: &T) -> std::io::Result<Self> {
         use libc::{SO_PEERCRED, SOL_SOCKET, c_void, getsockopt, socklen_t, ucred};
-        use std::os::unix::io::AsRawFd;
 
         let mut ucred = ucred {
             pid: 0,
