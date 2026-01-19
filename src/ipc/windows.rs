@@ -26,7 +26,7 @@ use crate::{
 
 use super::{Credentials, IntoServiceDescriptor, Message, Object, Policy};
 
-const DEFAULT_BUFFER_SIZE: u32 = 64;
+const DEFAULT_BUFFER_SIZE: u32 = 65536; // 64KB for kernel-side buffers
 const MIN_PENDING_ACCEPTS: usize = 16; // Maintain at least this many pending accepts
 const WIRE_MAGIC: u32 = 0x5350_494C; // 'gips'
 const WIRE_VERSION: u16 = 1;

@@ -338,7 +338,7 @@ impl TryFrom<NamedPipe> for IoHandleSource {
 }
 
 impl IoHandleSource {
-    pub const DEFAULT_BUFFER_SIZE: usize = 64;
+    pub const DEFAULT_BUFFER_SIZE: usize = 65536;
 
     /// Creates a new handle source.
     pub fn new(handle: Handle) -> io::Result<Self> {
